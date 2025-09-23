@@ -79,7 +79,7 @@ def convert_ad_timestamp(timestamp):
 	# AD timestamp is 100-nanosecond intervals since Jan 1, 1601
 	return datetime.datetime(1601, 1, 1) + datetime.timedelta(microseconds=timestamp/10)
 
-def get_password_last_set_data(domain, ldap_user, ldap_pass, usernames, target):
+def get_password_last_set_data(domain, ldap_user, ldap_pass, usernames, target, query_delay=0, query_jitter=0, logger=None):
 	"""Query LDAP for pwdLastSet data for a list of usernames"""
 
 	# Parse LDAP username - handle DOMAIN\username format
@@ -168,6 +168,17 @@ def get_password_last_set_data(domain, ldap_user, ldap_pass, usernames, target):
 			search_filter = f"(&(objectClass=user)(sAMAccountName={username}))"
 
 			try:
+				# Add delay between queries if specified
+				if query_delay > 0:
+					actual_delay = query_delay
+					if query_jitter > 0:
+						# Calculate jitter range: delay ± (delay * jitter_percent / 100)
+						jitter_amount = query_delay * (query_jitter / 100.0)
+						min_delay = query_delay - jitter_amount
+						max_delay = query_delay + jitter_amount
+						actual_delay = random.uniform(min_delay, max_delay)
+					time.sleep(actual_delay)
+
 				conn.search(domain_dn, search_filter, attributes=['pwdLastSet', 'sAMAccountName'])
 
 				if conn.entries:
@@ -188,6 +199,10 @@ def get_password_last_set_data(domain, ldap_user, ldap_pass, usernames, target):
 						last_set_date = None
 
 					user_data[username] = last_set_date
+
+					# Print user info immediately if logger provided
+					if logger and last_set_date:
+						logger.info(f"\033[94m[*] {username}: {last_set_date.strftime('%B %Y')}\033[0m")
 				else:
 					print(f"[!] User {username} not found in AD")
 			except Exception as e:
@@ -230,7 +245,7 @@ class MMCBrute(object):
 	def __init__(self, usernames, passwords, domain, target, output_log, output_creds,
 	             user_as_pass=False, honeybadger=False, verbose=False, loglvl='INFO',
 	             duration=None, randomize=False, smart=False, passpath=None,
-	             ldapuser=None, ldappass=None):
+	             ldapuser=None, ldappass=None, query_delay=0, query_jitter=0):
 		self.usernames = open(usernames, 'r')
 		self.len_usernames = sum((1 for _ in self.usernames))
 		self.usernames.seek(os.SEEK_SET)
@@ -269,6 +284,8 @@ class MMCBrute(object):
 		self.passpath = passpath
 		self.ldapuser = ldapuser
 		self.ldappass = ldappass
+		self.query_delay = query_delay
+		self.query_jitter = query_jitter
 		self.user_password_map = {}  # Maps username to their specific password list
 		self.passwords = None  # Initialize to None
 
@@ -312,7 +329,8 @@ class MMCBrute(object):
 		try:
 			# Query LDAP for password last set data
 			user_data = get_password_last_set_data(
-				self.domain, self.ldapuser, self.ldappass, username_list, self.target
+				self.domain, self.ldapuser, self.ldappass, username_list, self.target,
+				self.query_delay, self.query_jitter, self.logger
 			)
 
 			# Get top 3 months
@@ -332,7 +350,6 @@ class MMCBrute(object):
 							self.user_password_map[username] = passwords
 							filtered_usernames.append(username)
 							total_password_attempts += len(passwords)
-							self.logger.info(f"\033[94m[*] {username}: {last_set_date.strftime('%B %Y')} -> {len(passwords)} passwords from {month_key}.txt\033[0m")
 
 			# Update username list and counts
 			if filtered_usernames:
@@ -355,10 +372,20 @@ class MMCBrute(object):
 
 	@classmethod
 	def from_args(cls, args):
+		# Parse query_delay to extract delay and jitter
+		query_delay = 0
+		query_jitter = 0
+		if args.query_delay:
+			if len(args.query_delay) == 1:
+				query_delay = args.query_delay[0]
+			elif len(args.query_delay) >= 2:
+				query_delay = args.query_delay[0]
+				query_jitter = args.query_delay[1]
+
 		return cls(args.usernames, args.passwords, args.domain, args.target, args.output_log,
 		           args.output_creds, args.uap, args.hb, args.verbose, args.loglvl,
 		           args.duration, args.randomize, args.smart, args.passpath,
-		           args.ldapuser, args.ldappass)
+		           args.ldapuser, args.ldappass, query_delay, query_jitter)
 
 	def update_progress(self):
 		self.count += 1
@@ -517,6 +544,14 @@ class MMCBrute(object):
 		if self.smart:
 			self.logger.info(f"\033[94mPassword Path:\t\t{self.passpath}\033[0m")
 			self.logger.info(f"\033[94mLDAP User:\t\t{self.ldapuser}\033[0m")
+			if self.query_delay > 0:
+				if self.query_jitter > 0:
+					jitter_amount = self.query_delay * (self.query_jitter / 100.0)
+					min_delay = self.query_delay - jitter_amount
+					max_delay = self.query_delay + jitter_amount
+					self.logger.info(f"\033[94mQuery Delay:\t\t{self.query_delay} seconds ± {self.query_jitter}% ({min_delay:.1f}-{max_delay:.1f}s)\033[0m")
+				else:
+					self.logger.info(f"\033[94mQuery Delay:\t\t{self.query_delay} seconds\033[0m")
 
 if __name__ == '__main__':
 	script_path = os.path.dirname(os.path.abspath(__file__))
@@ -540,9 +575,24 @@ if __name__ == '__main__':
 	group.add_argument('--passpath', action='store', dest='passpath', help='Directory path containing monthly password files (jan.txt, feb.txt, etc.) - required with --smart')
 	group.add_argument('--ldapuser', action='store', dest='ldapuser', help='LDAP username for querying pwdLastSet (format: DOMAIN\\username or username@domain.com)')
 	group.add_argument('--ldappass', action='store', dest='ldappass', help='LDAP password for authentication')
+	group.add_argument('--query-delay', action='store', nargs='+', type=float, dest='query_delay', help='Delay in seconds between each LDAP pwdLastSet query. Format: SECONDS [JITTER_PERCENT] (e.g., "600 41" for 10min ± 41%%)')
 	options = parser.parse_args()
 	output_log = options.output_log
 	output_creds = options.output_creds
+
+	# Parse query_delay to extract delay and jitter
+	query_delay = 0
+	query_jitter = 0
+	if options.query_delay:
+		if len(options.query_delay) == 1:
+			query_delay = options.query_delay[0]
+		elif len(options.query_delay) == 2:
+			query_delay = options.query_delay[0]
+			query_jitter = options.query_delay[1]
+			if query_jitter < 0 or query_jitter > 100:
+				parser.error('Jitter percentage must be between 0 and 100')
+		else:
+			parser.error('--query-delay accepts 1 or 2 values: SECONDS [JITTER_PERCENT]')
 
 	if not options.smart and options.passwords is None and options.uap is False:
 		parser.error('The --passwords or --user-as-pass option is required (unless using --smart mode)')
