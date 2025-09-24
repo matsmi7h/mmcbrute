@@ -245,7 +245,7 @@ class MMCBrute(object):
 	def __init__(self, usernames, passwords, domain, target, output_log, output_creds,
 	             user_as_pass=False, honeybadger=False, verbose=False, loglvl='INFO',
 	             duration=None, randomize=False, smart=False, passpath=None,
-	             ldapuser=None, ldappass=None, query_delay=0, query_jitter=0):
+	             ldapuser=None, ldappass=None, ldapdc=None, query_delay=0, query_jitter=0):
 		self.usernames = open(usernames, 'r')
 		self.len_usernames = sum((1 for _ in self.usernames))
 		self.usernames.seek(os.SEEK_SET)
@@ -284,6 +284,7 @@ class MMCBrute(object):
 		self.passpath = passpath
 		self.ldapuser = ldapuser
 		self.ldappass = ldappass
+		self.ldapdc = ldapdc if ldapdc else target  # Use ldapdc if specified, otherwise use target
 		self.query_delay = query_delay
 		self.query_jitter = query_jitter
 		self.user_password_map = {}  # Maps username to their specific password list
@@ -329,7 +330,7 @@ class MMCBrute(object):
 		try:
 			# Query LDAP for password last set data
 			user_data = get_password_last_set_data(
-				self.domain, self.ldapuser, self.ldappass, username_list, self.target,
+				self.domain, self.ldapuser, self.ldappass, username_list, self.ldapdc,
 				self.query_delay, self.query_jitter, self.logger
 			)
 
@@ -385,7 +386,7 @@ class MMCBrute(object):
 		return cls(args.usernames, args.passwords, args.domain, args.target, args.output_log,
 		           args.output_creds, args.uap, args.hb, args.verbose, args.loglvl,
 		           args.duration, args.randomize, args.smart, args.passpath,
-		           args.ldapuser, args.ldappass, query_delay, query_jitter)
+		           args.ldapuser, args.ldappass, args.ldapdc, query_delay, query_jitter)
 
 	def update_progress(self):
 		self.count += 1
@@ -544,6 +545,8 @@ class MMCBrute(object):
 		if self.smart:
 			self.logger.info(f"\033[94mPassword Path:\t\t{self.passpath}\033[0m")
 			self.logger.info(f"\033[94mLDAP User:\t\t{self.ldapuser}\033[0m")
+			if self.ldapdc != self.target:
+				self.logger.info(f"\033[94mLDAP DC:\t\t{self.ldapdc}\033[0m")
 			if self.query_delay > 0:
 				if self.query_jitter > 0:
 					jitter_amount = self.query_delay * (self.query_jitter / 100.0)
@@ -575,6 +578,7 @@ if __name__ == '__main__':
 	group.add_argument('--passpath', action='store', dest='passpath', help='Directory path containing monthly password files (jan.txt, feb.txt, etc.) - required with --smart')
 	group.add_argument('--ldapuser', action='store', dest='ldapuser', help='LDAP username for querying pwdLastSet (format: DOMAIN\\username or username@domain.com)')
 	group.add_argument('--ldappass', action='store', dest='ldappass', help='LDAP password for authentication')
+	group.add_argument('--ldapdc', action='store', dest='ldapdc', help='Domain Controller IP/hostname for LDAP queries (default: uses -t target)')
 	group.add_argument('--query-delay', action='store', nargs='+', type=float, dest='query_delay', help='Delay in seconds between each LDAP pwdLastSet query. Format: SECONDS [JITTER_PERCENT] (e.g., "600 41" for 10min ± 41%%)')
 	options = parser.parse_args()
 	output_log = options.output_log
@@ -620,6 +624,8 @@ if __name__ == '__main__':
 		parser.error('--ldapuser can only be used with --smart mode')
 	if options.ldappass and not options.smart:
 		parser.error('--ldappass can only be used with --smart mode')
+	if options.ldapdc and not options.smart:
+		parser.error('--ldapdc can only be used with --smart mode')
 
 	# Make sure logs directory exists:
 	pathlib.Path('./logs').mkdir(exist_ok=True)
